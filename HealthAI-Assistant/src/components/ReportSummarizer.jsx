@@ -1,0 +1,229 @@
+import React, { useState, useCallback, useRef, useEffect } from 'react';
+import { FileText, Upload, MessageSquare, Send, Loader, Bot, User, AlertCircle, RefreshCw } from 'lucide-react';
+import { extractTextFromPdf } from '../utils/pdfUtils';
+import { queryMedicalReport, validateMedicalReport } from '../lib/gemini';
+import ReactMarkdown from 'react-markdown';
+import { useDropzone } from 'react-dropzone';
+import { PageContainer } from './ui/PageContainer';
+export default function ReportSummarizer() {
+    const [reportText, setReportText] = useState('');
+    const [fileName, setFileName] = useState('');
+    const [messages, setMessages] = useState([]);
+    const [input, setInput] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [uploadLoading, setUploadLoading] = useState(false);
+    const [error, setError] = useState('');
+    const messagesEndRef = useRef(null);
+    const scrollToBottom = () => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    };
+    useEffect(() => {
+        scrollToBottom();
+    }, [messages]);
+    const handleClearSession = () => {
+        setReportText('');
+        setFileName('');
+        setMessages([]);
+        setInput('');
+        setError('');
+    };
+    const onDrop = useCallback(async (acceptedFiles) => {
+        const file = acceptedFiles[0];
+        if (!file)
+            return;
+        setUploadLoading(true);
+        setFileName(file.name);
+        setError('');
+        setMessages([]);
+        try {
+            const text = await extractTextFromPdf(file);
+            // Validate if the extracted text is actually a medical report
+            const isValidMedicalReport = await validateMedicalReport(text);
+            if (!isValidMedicalReport) {
+                setError('⚠️ This doesn\'t appear to be a medical report. Please upload a valid medical document.');
+                setReportText('');
+                setFileName('');
+                return;
+            }
+            setReportText(text);
+            setMessages([{
+                    type: 'bot',
+                    content: `✅ **Medical report "${file.name}" has been successfully uploaded and processed!**\n\nYou can now ask me anything about your medical report. For example:\n- "What are my blood test results?"\n- "Explain the diagnosis in simple terms"\n- "Are there any abnormal findings?"\n- "What do the test values mean?"\n- "What should I discuss with my doctor?"`,
+                    timestamp: new Date(),
+                }]);
+        }
+        catch (error) {
+            console.error(error);
+            setError('Error processing the medical report. Please try again.');
+            setReportText('');
+            setFileName('');
+        }
+        finally {
+            setUploadLoading(false);
+        }
+    }, []);
+    const { getRootProps, getInputProps, isDragActive } = useDropzone({
+        onDrop,
+        accept: {
+            'application/pdf': ['.pdf'],
+        },
+        multiple: false,
+    });
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        if (!input.trim() || loading || !reportText)
+            return;
+        const userMessage = {
+            type: 'user',
+            content: input.trim(),
+            timestamp: new Date(),
+        };
+        setMessages(prev => [...prev, userMessage]);
+        setInput('');
+        setLoading(true);
+        setError('');
+        // Add typing indicator
+        const typingMessage = {
+            type: 'bot',
+            content: '...',
+            timestamp: new Date(),
+            isTyping: true,
+        };
+        setMessages(prev => [...prev, typingMessage]);
+        try {
+            const response = await queryMedicalReport(userMessage.content, reportText);
+            // Remove typing indicator and add actual response
+            setMessages(prev => {
+                const filtered = prev.filter(msg => !msg.isTyping);
+                return [...filtered, {
+                        type: 'bot',
+                        content: response,
+                        timestamp: new Date(),
+                    }];
+            });
+        }
+        catch (error) {
+            console.error(error);
+            setError('Failed to process your query. Please try again.');
+            setMessages(prev => {
+                const filtered = prev.filter(msg => !msg.isTyping);
+                return [...filtered, {
+                        type: 'bot',
+                        content: 'I apologize, but I encountered an error processing your query. Please try again.',
+                        timestamp: new Date(),
+                    }];
+            });
+        }
+        setLoading(false);
+    };
+    const renderChatInterface = () => (<div className="mt-6 flex flex-col h-[500px] bg-card/70 rounded-2xl border border-border/60">
+      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {messages.length === 0 && reportText && (<div className="text-center text-muted-foreground mt-8">
+            <MessageSquare className="w-12 h-12 mx-auto mb-4 text-primary"/>
+            <p className="text-lg font-medium text-foreground">Medical Report Assistant Ready</p>
+            <p className="mt-2">Ask me anything about your uploaded medical report.</p>
+          </div>)}
+        
+        {messages.map((message, index) => (<div key={index} className={`flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div className={`flex items-start space-x-2 max-w-[80%] ${message.type === 'user' ? 'flex-row-reverse space-x-reverse' : 'flex-row'}`}>
+              <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${message.type === 'user' ? 'bg-primary/15 border border-primary/20' : 'bg-muted border border-border/60'}`}>
+                {message.type === 'user' ? (<User className="w-5 h-5 text-primary"/>) : (<Bot className="w-5 h-5 text-muted-foreground"/>)}
+              </div>
+              <div className={`p-4 rounded-lg ${message.type === 'user'
+                ? 'bg-primary/15 text-foreground border border-primary/20'
+                : 'bg-background/40 border border-border/60 text-foreground'}`}>
+                {message.isTyping ? (<div className="flex items-center space-x-2">
+                    <Loader className="w-4 h-4 animate-spin text-primary"/>
+                    <span className="text-muted-foreground">Analyzing report...</span>
+                  </div>) : (<>
+                    <div className="prose prose-sm max-w-none">
+                      <ReactMarkdown>{message.content}</ReactMarkdown>
+                    </div>
+                    <div className={`text-xs mt-2 ${message.type === 'user' ? 'text-primary' : 'text-muted-foreground'}`}>
+                      {message.timestamp.toLocaleTimeString()}
+                    </div>
+                  </>)}
+              </div>
+            </div>
+          </div>))}
+        <div ref={messagesEndRef}/>
+      </div>
+
+      <form onSubmit={handleSubmit} className="flex gap-3 p-4 bg-card/50 border-t border-border/60">
+        <input type="text" value={input} onChange={(e) => setInput(e.target.value)} placeholder="Ask about your medical report (e.g., 'What are my blood test results?')" className="flex-1 h-12 px-4 border border-input bg-background text-foreground rounded-lg focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent transition-all duration-200 placeholder:text-muted-foreground" disabled={loading || !reportText}/>
+        <button type="submit" disabled={loading || !input.trim() || !reportText} className="px-6 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all duration-200">
+          {loading ? (<>
+              <Loader className="w-5 h-5 animate-spin"/>
+              <span className="hidden sm:inline">Processing...</span>
+            </>) : (<>
+              <Send className="w-5 h-5"/>
+              <span className="hidden sm:inline">Ask</span>
+            </>)}
+        </button>
+      </form>
+    </div>);
+    return (<PageContainer icon={<FileText className="w-6 h-6 text-primary"/>} title="Medical Report Assistant" description="Upload a PDF report and ask questions in plain language.">
+      <div className="space-y-6">
+        {/* Upload Section */}
+        <div className="relative">
+          <div {...getRootProps()} className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-colors ${isDragActive
+            ? 'border-primary bg-primary/10'
+            : 'border-input hover:border-primary/60'} ${reportText ? 'bg-green-500/10 border-green-500/30' : 'bg-card/40'}`}>
+            <input {...getInputProps()}/>
+            <Upload className={`mx-auto h-12 w-12 ${reportText ? 'text-green-400' : 'text-muted-foreground'}`}/>
+            {uploadLoading ? (<div className="mt-4">
+                <Loader className="w-6 h-6 animate-spin mx-auto text-primary"/>
+                <p className="mt-2 text-sm text-primary">Processing medical report...</p>
+              </div>) : reportText ? (<div className="mt-4">
+                <p className="text-sm text-green-400 font-medium">✅ Medical report uploaded successfully!</p>
+                <p className="text-xs text-muted-foreground mt-1">{fileName}</p>
+                <p className="text-xs text-muted-foreground mt-2">Click to upload a different report</p>
+              </div>) : (<div className="mt-4">
+                <p className="text-sm text-foreground/80">
+                  Drag and drop your medical report PDF here, or click to select
+                </p>
+                <p className="text-xs text-muted-foreground mt-2">
+                  Supports PDF files up to 50MB
+                </p>
+              </div>)}
+          </div>
+          
+          {/* Clear Session Button */}
+          {reportText && (<button onClick={handleClearSession} className="absolute top-4 right-4 px-4 py-2 bg-destructive/15 text-destructive rounded-lg hover:bg-destructive/20 transition-colors duration-200 flex items-center gap-2 text-sm font-medium border border-destructive/20">
+              <RefreshCw className="w-4 h-4"/>
+              New Session
+            </button>)}
+        </div>
+
+        {error && (<div className="p-3 bg-destructive/10 border border-destructive/20 rounded-lg flex items-center gap-2 text-destructive">
+            <AlertCircle className="w-5 h-5"/>
+            <span>{error}</span>
+          </div>)}
+
+        {/* Instructions */}
+        <div className="bg-primary/10 border border-primary/20 rounded-2xl p-6">
+          <h3 className="text-lg font-semibold text-foreground mb-3">How to Use</h3>
+          <div className="space-y-2 text-sm text-muted-foreground">
+            <p><strong>1. Upload:</strong> Upload your medical report (PDF format)</p>
+            <p><strong>2. Chat:</strong> Ask questions in natural language about your report</p>
+            <p><strong>3. Get Answers:</strong> Receive detailed, easy-to-understand explanations</p>
+            <p><strong>4. New Session:</strong> Click "New Session" to clear and start fresh</p>
+          </div>
+          
+          <div className="mt-4">
+            <h4 className="font-medium text-foreground mb-2">Sample Questions</h4>
+            <ul className="text-xs text-muted-foreground space-y-1">
+              <li>• "What are my blood test results?"</li>
+              <li>• "Explain the diagnosis in simple terms"</li>
+              <li>• "Are there any abnormal findings?"</li>
+              <li>• "What do my cholesterol levels mean?"</li>
+              <li>• "What should I discuss with my doctor?"</li>
+            </ul>
+          </div>
+        </div>
+
+        {/* Chat Interface */}
+        {reportText && renderChatInterface()}
+      </div>
+    </PageContainer>);
+}

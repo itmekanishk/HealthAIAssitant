@@ -68,6 +68,11 @@ function buildFriendlyGeminiError(error) {
     );
   }
 
+  if (msg) {
+    // Preserve useful server-side errors (e.g., missing API keys / invalid provider config).
+    return new Error(msg.replace(/^\[\d+\]\s*/, ""));
+  }
+
   return new Error("AI request failed. Please try again.");
 }
 

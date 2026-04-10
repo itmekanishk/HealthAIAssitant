@@ -1,55 +1,16 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import { loadEnv } from "vite";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { readJsonBody, sendJson, getStatusCode, extractPromptAndImages } from "./ai/utils.js";
+import { selectProvider } from "./ai/selectProvider.js";
 
-const MODEL_NAME = "gemini-2.0-flash";
-
-const readJsonBody = (req) => new Promise((resolve, reject) => {
-  let body = "";
-
-  req.on("data", (chunk) => {
-    body += chunk;
-  });
-
-  req.on("end", () => {
-    if (!body) {
-      resolve({});
-      return;
-    }
-
-    try {
-      resolve(JSON.parse(body));
-    } catch {
-      reject(new Error("Invalid JSON request body"));
-    }
-  });
-
-  req.on("error", reject);
-});
-
-const getStatusCode = (error) => {
-  const message = error instanceof Error ? error.message : String(error ?? "");
-
-  if (message.includes("[429")) return 429;
-  if (message.includes("[401")) return 401;
-  if (message.includes("[403")) return 403;
-
-  return 500;
-};
-
-const sendJson = (res, statusCode, payload) => {
-  res.statusCode = statusCode;
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.end(JSON.stringify(payload));
-};
+const ENV_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const createGeminiHandler = (mode) => {
-  const env = loadEnv(mode, process.cwd(), "");
-  const apiKey = env.GEMINI_API_KEY || env.VITE_GEMINI_API_KEY;
-  const model = apiKey
-    ? new GoogleGenerativeAI(apiKey).getGenerativeModel({ model: MODEL_NAME })
-    : null;
-
   return async (req, res) => {
+    const env = loadEnv(mode, ENV_DIR, "");
+    const provider = selectProvider(env);
+
     if (!req.url) {
       sendJson(res, 404, { error: "Not found" });
       return;
@@ -57,14 +18,6 @@ const createGeminiHandler = (mode) => {
 
     if (req.method !== "POST") {
       sendJson(res, 405, { error: "Method not allowed" });
-      return;
-    }
-
-    if (!model) {
-      sendJson(res, 500, {
-        error:
-          "Gemini API key is not configured on the server. Set GEMINI_API_KEY or VITE_GEMINI_API_KEY in .env.",
-      });
       return;
     }
 
@@ -76,22 +29,31 @@ const createGeminiHandler = (mode) => {
         return;
       }
 
+      res.setHeader("X-AI-Provider", provider.name);
+
+      const { hasImages } = extractPromptAndImages(parts);
+      if (hasImages && !provider.supportsImages) {
+        sendJson(res, 400, {
+          error:
+            "This request includes an image, but the selected provider does not support image analysis via this proxy. Set AI_PROVIDER=gemini for image features.",
+        });
+        return;
+      }
+
       if (req.url === "/generate") {
-        const result = await model.generateContent(parts);
-        sendJson(res, 200, { text: result.response.text() });
+        const text = await provider.generate({ parts });
+        sendJson(res, 200, { text, provider: provider.name });
         return;
       }
 
       if (req.url === "/stream") {
-        const result = await model.generateContentStream(parts);
-
         res.statusCode = 200;
         res.setHeader("Content-Type", "text/plain; charset=utf-8");
         res.setHeader("Cache-Control", "no-cache");
         res.setHeader("Connection", "keep-alive");
 
-        for await (const chunk of result.stream) {
-          res.write(chunk.text());
+        for await (const chunk of provider.stream({ parts })) {
+          res.write(chunk);
         }
 
         res.end();
